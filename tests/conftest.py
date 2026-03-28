@@ -11,7 +11,12 @@ if src_str not in sys.path:
 from roborock_local_server.security import hash_password
 
 
-def write_release_config(tmp_path: Path, *, broker_mode: str = "external", enable_topic_bridge: bool = False) -> Path:
+def write_release_config(
+    tmp_path: Path,
+    *,
+    broker_mode: str = "external",
+    enable_topic_bridge: bool = False,
+) -> Path:
     cert_dir = tmp_path / "certs"
     cert_dir.mkdir(parents=True, exist_ok=True)
     (cert_dir / "fullchain.pem").write_text("test-cert\n", encoding="utf-8")

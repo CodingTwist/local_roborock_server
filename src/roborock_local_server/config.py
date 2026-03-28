@@ -186,7 +186,6 @@ def load_config(path: str | Path) -> AppConfig:
     else:
         _require_non_empty(config.tls.cert_file, "tls.cert_file")
         _require_non_empty(config.tls.key_file, "tls.key_file")
-
     return config
 
 

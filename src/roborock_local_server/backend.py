@@ -19,6 +19,7 @@ if backend_str not in sys.path:
     sys.path.insert(0, backend_str)
 
 from https_server.endpoint_rules import default_endpoint_rules, resolve_route  # type: ignore  # noqa: E402
+from https_server.routes.plugin.dispatch import PluginZipDispatchError, dispatch_plugin_zip_request  # type: ignore  # noqa: E402
 from import_web_inventory_from_cloud import (  # type: ignore  # noqa: E402
     _build_inventory,
     _fetch_additional_web_cache,
@@ -59,7 +60,9 @@ __all__ = [
     "_normalize_value_map",
     "append_jsonl",
     "classify_host",
+    "dispatch_plugin_zip_request",
     "default_endpoint_rules",
+    "PluginZipDispatchError",
     "resolve_route",
     "setup_file_logger",
     "start_broker",

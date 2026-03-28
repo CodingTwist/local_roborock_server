@@ -17,9 +17,8 @@ import signal
 import socket
 import threading
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs
 
-import aiohttp
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 import uvicorn
@@ -40,7 +39,9 @@ from .backend import (
     _merge_vacuum_state,
     append_jsonl,
     classify_host,
+    dispatch_plugin_zip_request,
     default_endpoint_rules,
+    PluginZipDispatchError,
     resolve_route,
     setup_file_logger,
     start_broker,
@@ -67,21 +68,6 @@ PROJECT_SUPPORT = {
         {"label": "Amazon Affiliate", "url": "https://amzn.to/4bGfG6B"},
     ],
 }
-
-PLUGIN_PROXY_ALLOWED_HOSTS = {
-    "files.roborock.com",
-    "app-files.roborock.com",
-    "rrpkg-us.roborock.com",
-    "cdn.awsusor0.fds.api.mi-img.com",
-}
-
-LEGACY_CATEGORY_PLUGIN_SOURCES = {
-    "robot_vacuum_cleaner": "https://files.roborock.com/iot/plugin/979bb22f91a24f10a8bafe232b4fb5ee.zip",
-    "roborock_wetdryvac": "https://cdn.awsusor0.fds.api.mi-img.com/resources/iot/plugin/10320c51139848e9ade1e6bd231e15c8.zip",
-    "roborock_wm": "https://cdn.awsusor0.fds.api.mi-img.com/resources/iot/plugin/7f2a3e398aa54427afb48461f69a1a8c.zip",
-}
-
-PLUGIN_PROXY_MAX_BYTES = 32 * 1024 * 1024
 
 
 def _utcnow_iso() -> str:
@@ -681,86 +667,6 @@ class ReleaseSupervisor:
         if not self._authenticated(request):
             raise HTTPException(status_code=401, detail="Authentication required")
 
-    @staticmethod
-    def _first_query_value(query_params: dict[str, list[str]], *keys: str) -> str:
-        for key in keys:
-            values = query_params.get(key) or []
-            for value in values:
-                candidate = str(value or "").strip()
-                if candidate:
-                    return candidate
-        return ""
-
-    @staticmethod
-    def _is_allowed_plugin_source(source_url: str) -> bool:
-        parsed = urlparse(source_url)
-        if parsed.scheme.lower() != "https":
-            return False
-        host = (parsed.hostname or "").strip().lower()
-        if not host:
-            return False
-        if host in PLUGIN_PROXY_ALLOWED_HOSTS:
-            return True
-        return host.endswith(".fds.api.mi-img.com")
-
-    def _plugin_source_from_request(self, clean_path: str, query_params: dict[str, list[str]]) -> str:
-        path = clean_path.rstrip("/")
-        if path.startswith("/plugin/proxy/") and path.endswith(".zip"):
-            source = self._first_query_value(query_params, "src", "url")
-            if source and self._is_allowed_plugin_source(source):
-                return source
-            return ""
-        if path.startswith("/plugin/category/") and path.endswith(".zip"):
-            slug = path.rsplit("/", 1)[-1].removesuffix(".zip").strip().lower()
-            source = LEGACY_CATEGORY_PLUGIN_SOURCES.get(slug, "")
-            if source and self._is_allowed_plugin_source(source):
-                return source
-        return ""
-
-    def _plugin_cache_path(self, source_url: str) -> Path:
-        digest = hashlib.sha256(source_url.encode("utf-8")).hexdigest()
-        return self.paths.runtime_dir / "plugin_proxy_cache" / f"{digest}.zip"
-
-    async def _download_plugin_zip(self, source_url: str) -> tuple[bytes, str]:
-        timeout = aiohttp.ClientTimeout(total=45)
-        headers = {"User-Agent": "roborock-local-server/0.1"}
-        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-            async with session.get(source_url, allow_redirects=True) as response:
-                status = int(response.status)
-                if status != 200:
-                    raise RuntimeError(f"upstream returned HTTP {status}")
-                data = await response.read()
-                if not data:
-                    raise RuntimeError("upstream returned empty content")
-                if len(data) > PLUGIN_PROXY_MAX_BYTES:
-                    raise RuntimeError(
-                        f"plugin too large: {len(data)} bytes exceeds {PLUGIN_PROXY_MAX_BYTES} byte limit"
-                    )
-                content_type = str(response.headers.get("Content-Type") or "application/zip").strip()
-                return data, content_type
-
-    async def _plugin_proxy_response(self, source_url: str) -> Response:
-        cache_path = self._plugin_cache_path(source_url)
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        if cache_path.exists():
-            payload = cache_path.read_bytes()
-            return Response(
-                content=payload,
-                media_type="application/zip",
-                headers={"Cache-Control": "public, max-age=86400", "X-RR-Plugin-Cache": "hit"},
-            )
-
-        payload, upstream_content_type = await self._download_plugin_zip(source_url)
-        temp_path = cache_path.with_suffix(".tmp")
-        temp_path.write_bytes(payload)
-        temp_path.replace(cache_path)
-        media_type = upstream_content_type if "zip" in upstream_content_type.lower() else "application/zip"
-        return Response(
-            content=payload,
-            media_type=media_type,
-            headers={"Cache-Control": "public, max-age=86400", "X-RR-Plugin-Cache": "miss"},
-        )
-
     async def _handle_roborock_request(self, request: Request) -> Response:
         host = (request.headers.get("host") or "").strip()
         group = classify_host(host)
@@ -854,47 +760,52 @@ class ReleaseSupervisor:
                 "header_sample_added": header_sample_added,
             }
 
-        plugin_source = self._plugin_source_from_request(clean_path, query_params)
-        if plugin_source:
-            route_name = "plugin_proxy"
+        try:
+            plugin_dispatch = await dispatch_plugin_zip_request(
+                clean_path=clean_path,
+                query_params=query_params,
+                runtime_dir=self.paths.runtime_dir,
+            )
+        except PluginZipDispatchError as exc:
+            route_name = exc.route_name
+            plugin_source = exc.source_url
+            error_payload = {
+                "success": False,
+                "code": 502,
+                "msg": "plugin_proxy_failed",
+                "data": {"source": plugin_source, "error": str(exc)},
+            }
+            entry["route"] = route_name
+            entry["plugin_source"] = plugin_source
+            entry["response_json"] = error_payload
             try:
-                response = await self._plugin_proxy_response(plugin_source)
-            except Exception as exc:  # noqa: BLE001
-                error_payload = {
-                    "success": False,
-                    "code": 502,
-                    "msg": "plugin_proxy_failed",
-                    "data": {"source": plugin_source, "error": str(exc)},
-                }
-                entry["route"] = route_name
-                entry["plugin_source"] = plugin_source
-                entry["response_json"] = error_payload
-                try:
-                    self.runtime_state.record_http_event(
-                        event_time=str(entry["time"]),
-                        route_name=route_name,
-                        clean_path=clean_path,
-                        raw_path=raw_path,
-                        method=request.method,
-                        host=host,
-                        remote=str(entry["remote"]),
-                        did=explicit_did or None,
-                        pid=explicit_pid or None,
-                    )
-                except Exception as record_exc:  # noqa: BLE001
-                    logger.warning("runtime_state record_http_event failed: %s", record_exc)
-                append_jsonl(self.context.http_jsonl, entry)
-                logger.warning(
-                    "%s %s host=%s route=%s plugin_source=%s error=%s",
-                    request.method,
-                    clean_path,
-                    host or "-",
-                    route_name,
-                    plugin_source,
-                    exc,
+                self.runtime_state.record_http_event(
+                    event_time=str(entry["time"]),
+                    route_name=route_name,
+                    clean_path=clean_path,
+                    raw_path=raw_path,
+                    method=request.method,
+                    host=host,
+                    remote=str(entry["remote"]),
+                    did=explicit_did or None,
+                    pid=explicit_pid or None,
                 )
-                return JSONResponse(error_payload, status_code=502)
+            except Exception as record_exc:  # noqa: BLE001
+                logger.warning("runtime_state record_http_event failed: %s", record_exc)
+            append_jsonl(self.context.http_jsonl, entry)
+            logger.warning(
+                "%s %s host=%s route=%s plugin_source=%s error=%s",
+                request.method,
+                clean_path,
+                host or "-",
+                route_name,
+                plugin_source,
+                exc,
+            )
+            return JSONResponse(error_payload, status_code=502)
 
+        if plugin_dispatch is not None:
+            route_name, plugin_source, response = plugin_dispatch
             entry["route"] = route_name
             entry["plugin_source"] = plugin_source
             entry["response_meta"] = {

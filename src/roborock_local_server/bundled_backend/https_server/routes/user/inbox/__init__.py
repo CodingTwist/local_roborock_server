@@ -1,0 +1,1 @@
+"""User inbox route modules."""

@@ -122,3 +122,4 @@ class CertificateManager:
         )
         if not self.paths.cert_file.exists() or not self.paths.key_file.exists():
             raise RuntimeError("ACME completed without writing certificate files")
+

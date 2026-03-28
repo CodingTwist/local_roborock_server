@@ -1,0 +1,34 @@
+"""Route handler for /api/v2/appconfig."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from shared.context import ServerContext
+
+from ...auth.service import ok
+from ..appconfig_service import app_config_common_payload
+
+_APP_CONFIG_V2_EXTRAS = {
+    "entryConfigs": [
+        {"name": "MEMBER_CENTER", "enabled": False, "target": None},
+        {"name": "SERVICE_CENTER", "enabled": False, "target": None},
+    ],
+    "pluginEntryConfigs": {"ASSISTANT": False},
+}
+
+
+def match(path: str) -> bool:
+    return path.rstrip("/") == "/api/v2/appconfig"
+
+
+def build(
+    ctx: ServerContext,
+    query_params: dict[str, list[str]],
+    body_params: dict[str, list[str]],
+    clean_path: str,
+) -> dict[str, Any]:
+    _ = ctx, query_params, body_params, clean_path
+    payload = app_config_common_payload()
+    payload.update(_APP_CONFIG_V2_EXTRAS)
+    return ok(payload)
