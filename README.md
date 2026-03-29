@@ -47,14 +47,9 @@ Pick one hostname under your domain, for example `roborock.example.com`.
 - Cloudflare is only used for DNS-01 certificate issuance. It does not need to proxy traffic to your server.
 
 The vacuum needs to be able to hit your server on ports 443/tcp and 8883/tcp.
-If you use iPhone MITM intercept, expose 8081/tcp for the mitmweb UI (logs + WireGuard QR).
-When running in Docker, prefer the Admin "Open WireGuard Config (Docker-safe)" link over mitmweb's QR if the QR shows a container-only endpoint.
-The Admin MITM panel also provides an "Open WireGuard QR" code generated from the Docker-safe config.
 
 - `443/tcp` for HTTPS
 - `8883/tcp` for MQTT over TLS
-- `8081/tcp` for mitmweb (optional, MITM only, access by IP not hostname)
-- `51820/udp` for WireGuard MITM tunnel traffic
 
 ## Project Layout
 
@@ -83,34 +78,33 @@ cd roborock_local_server
 uv sync
 ```
 
-3. Generate an admin password hash.
+3. Run the setup wizard.
 
 ```bash
-uv run roborock-local-server hash-password
+uv run roborock-local-server configure
 ```
 
-4. Generate an admin session secret.
+The wizard asks only for:
 
-```bash
-uv run roborock-local-server generate-secret
-```
+- your `stack_fqdn`
+- embedded MQTT or your own broker
+- whether to use Cloudflare DNS-01 auto-renew
+- your admin password
 
-Both commands print a single value to your terminal and do not save it to a file for you.
+It then writes `config.toml` for you, generates `admin.password_hash`, generates `admin.session_secret`, and if you chose Cloudflare it also writes `secrets/cloudflare_token`.
 
-- `hash-password` prints the value you should paste into `admin.password_hash`
-- `generate-secret` prints the value you should paste into `admin.session_secret`
-- if you did not save the output earlier, just run the command again and use the new value
-- if you change `session_secret` later, existing admin login sessions will be invalidated
+4. If you chose external MQTT, fill in `broker.host` in `config.toml` before starting the stack.
 
-5. Create the secrets folder and save your Cloudflare API token.
+5. If you skipped Cloudflare, put your certificate files in `data/certs/fullchain.pem` and `data/certs/privkey.pem`.
 
-```bash
-mkdir -p secrets
-printf '%s' 'YOUR_CLOUDFLARE_TOKEN' > secrets/cloudflare_token
-chmod 600 secrets/cloudflare_token
-```
+6. If you prefer doing setup manually, the wizard is equivalent to:
 
-6. Create `config.toml` with this baseline configuration.
+- `uv run roborock-local-server hash-password`
+- `uv run roborock-local-server generate-secret`
+- creating `secrets/cloudflare_token` yourself
+- writing `config.toml` yourself
+
+7. The wizard produces a config in this shape.
 
 ```toml
 [network]
@@ -206,17 +200,17 @@ session_secret = "PASTE_THE_SECRET_FROM_GENERATE_SECRET"
 session_ttl_seconds = 86400
 ```
 
-7. In your private DNS, point `roborock.example.com` to your server's LAN IP.
+8. In your private DNS, point `roborock.example.com` to your server's LAN IP.
 
-8. Start the stack.
+9. Start the stack.
 
 ```bash
 docker compose up --build -d
 ```
 
-9. Open `https://roborock.example.com/admin` from a device on the same LAN.
+10. Open `https://roborock.example.com/admin` from a device on the same LAN.
 
-10. Sign in and use the Cloud Import section to request an email code and import your Roborock cloud data.
+11. Sign in and use the Cloud Import section to request an email code and import your Roborock cloud data.
 
 ## External MQTT
 
@@ -288,6 +282,7 @@ The admin UI is intentionally small:
 - show service health
 - show known vacuums
 - import cloud data with email-code login
+- pair a device and track onboarding progress
 - show built-in support links for the project
 
 ## Persistent Data

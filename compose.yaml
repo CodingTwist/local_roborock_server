@@ -5,13 +5,9 @@ services:
       dockerfile: Dockerfile
     container_name: roborock-local-server
     restart: unless-stopped
-    cap_add:
-      - NET_ADMIN
     ports:
       - "443:443"
       - "8883:8883"
-      - "8081:8081"
-      - "51820:51820/udp"
     volumes:
       - ./config.toml:/app/config.toml:ro
       - ./data:/data

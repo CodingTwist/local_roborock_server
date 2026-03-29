@@ -1,6 +1,4 @@
 import json
-import sys
-import types
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -183,7 +181,6 @@ def test_admin_login_and_status_flow(tmp_path: Path) -> None:
     ]
     assert payload["health"]["services"]
     assert payload["pairing"]["active"] is False
-    assert payload["mitm_intercept"]["running"] is False
 
     vacuums = client.get("/admin/api/vacuums")
     assert vacuums.status_code == 200
@@ -193,8 +190,9 @@ def test_admin_login_and_status_flow(tmp_path: Path) -> None:
     assert dashboard_page.status_code == 200
     assert "Cloud Import" in dashboard_page.text
     assert "Pair Device" in dashboard_page.text
-    assert "iPhone MITM Intercept" in dashboard_page.text
-    assert "Open WireGuard QR" in dashboard_page.text
+    assert "Num query samples" in dashboard_page.text
+    assert "Public Key determined" in dashboard_page.text
+    assert "Mqtt connected" in dashboard_page.text
     assert "Buy Me a Coffee" in dashboard_page.text
     assert "PayPal" in dashboard_page.text
     assert "5% Off Roborock Store" in dashboard_page.text
@@ -224,197 +222,6 @@ def test_core_only_mode_disables_standalone_admin_routes(tmp_path: Path) -> None
 
     region_response = client.get("/region")
     assert region_response.status_code == 200
-
-
-def test_admin_mitm_start_stop_endpoints_removed(tmp_path: Path) -> None:
-    config_file = write_release_config(tmp_path)
-    config = load_config(config_file)
-    paths = resolve_paths(config_file, config)
-    supervisor = ReleaseSupervisor(config=config, paths=paths)
-
-    client = TestClient(supervisor.app)
-    login = client.post("/admin/api/login", json={"password": "correct horse battery staple"})
-    assert login.status_code == 200
-
-    status_before = client.get("/admin/api/mitm/status")
-    assert status_before.status_code == 200
-    assert status_before.json()["mitm_intercept"]["running"] is False
-
-    start = client.post("/admin/api/mitm/start")
-    assert start.status_code == 410
-    assert "managed externally" in start.json()["error"]
-
-    stop = client.post("/admin/api/mitm/stop")
-    assert stop.status_code == 410
-    assert "managed externally" in stop.json()["error"]
-
-def test_admin_mitm_log_tail_and_logs_page(tmp_path: Path) -> None:
-    config_file = write_release_config(tmp_path)
-    config = load_config(config_file)
-    paths = resolve_paths(config_file, config)
-    supervisor = ReleaseSupervisor(config=config, paths=paths)
-
-    log_path = tmp_path / "mitm_intercept.log"
-    log_path.write_text(
-        "\n".join(
-            [
-                "WireGuard mode active",
-                "Scan QR code in WireGuard app",
-                "Web UI: http://127.0.0.1:8081/",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    supervisor.mitm_intercept._log_path = log_path  # type: ignore[attr-defined]
-
-    client = TestClient(supervisor.app)
-    login = client.post("/admin/api/login", json={"password": "correct horse battery staple"})
-    assert login.status_code == 200
-
-    logs_page = client.get("/admin/mitm/logs")
-    assert logs_page.status_code == 200
-    assert "MITM Logs" in logs_page.text
-
-    tail = client.get("/admin/api/mitm/log-tail?lines=50")
-    assert tail.status_code == 200
-    payload = tail.json()
-    assert payload["ok"] is True
-    assert "WireGuard mode active" in payload["lines"]
-    assert any("Scan QR code" in line for line in payload["setup_hints"])
-    assert "http://127.0.0.1:8081/" in payload["detected_urls"]
-
-
-def test_admin_mitm_wireguard_config_endpoint(tmp_path: Path) -> None:
-    config_file = write_release_config(tmp_path)
-    config = load_config(config_file)
-    paths = resolve_paths(config_file, config)
-    supervisor = ReleaseSupervisor(config=config, paths=paths)
-
-    wireguard_conf = tmp_path / "wireguard-client.conf"
-    wireguard_conf.write_text(
-        "[Interface]\nPrivateKey = abc\nAddress = 10.0.0.2/32\n",
-        encoding="utf-8",
-    )
-    log_path = tmp_path / "mitm_intercept.log"
-    log_path.write_text(
-        f"Client config written to {wireguard_conf}\n",
-        encoding="utf-8",
-    )
-    supervisor.mitm_intercept._log_path = log_path  # type: ignore[attr-defined]
-    client = TestClient(supervisor.app)
-    login = client.post("/admin/api/login", json={"password": "correct horse battery staple"})
-    assert login.status_code == 200
-
-    response = client.get("/admin/api/mitm/wireguard-config")
-    assert response.status_code == 200
-    assert "[Interface]" in response.text
-    assert "PrivateKey = abc" in response.text
-
-
-def test_admin_mitm_wireguard_config_rewrites_docker_endpoint_from_log_block(tmp_path: Path) -> None:
-    config_file = write_release_config(tmp_path)
-    config = load_config(config_file)
-    paths = resolve_paths(config_file, config)
-    supervisor = ReleaseSupervisor(config=config, paths=paths)
-
-    log_path = tmp_path / "mitm_intercept.log"
-    log_path.write_text(
-        "\n".join(
-            [
-                "------------------------------------------------------------",
-                "[Interface]",
-                "PrivateKey = client-key",
-                "Address = 10.0.0.1/32",
-                "DNS = 10.0.0.53",
-                "[Peer]",
-                "PublicKey = server-key",
-                "AllowedIPs = 0.0.0.0/0",
-                "Endpoint = 172.19.0.2:51820",
-                "------------------------------------------------------------",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    supervisor.mitm_intercept._log_path = log_path  # type: ignore[attr-defined]
-    supervisor.mitm_intercept._wireguard_endpoint_host = "192.168.1.42"  # type: ignore[attr-defined]
-    client = TestClient(supervisor.app)
-    login = client.post("/admin/api/login", json={"password": "correct horse battery staple"})
-    assert login.status_code == 200
-
-    response = client.get("/admin/api/mitm/wireguard-config?endpoint_host=192.168.1.42")
-    assert response.status_code == 200
-    assert "PrivateKey = client-key" in response.text
-    assert "PublicKey = server-key" in response.text
-    assert "Endpoint = 192.168.1.42:51820" in response.text
-    assert "Endpoint = 172.19.0.2:51820" not in response.text
-
-
-def test_admin_mitm_wireguard_qr_endpoint_returns_svg(tmp_path: Path, monkeypatch) -> None:
-    config_file = write_release_config(tmp_path)
-    config = load_config(config_file)
-    paths = resolve_paths(config_file, config)
-    supervisor = ReleaseSupervisor(config=config, paths=paths)
-
-    log_path = tmp_path / "mitm_intercept.log"
-    log_path.write_text(
-        "\n".join(
-            [
-                "------------------------------------------------------------",
-                "[Interface]",
-                "PrivateKey = client-key",
-                "Address = 10.0.0.1/32",
-                "DNS = 10.0.0.53",
-                "[Peer]",
-                "PublicKey = server-key",
-                "AllowedIPs = 0.0.0.0/0",
-                "Endpoint = 172.19.0.2:51820",
-                "------------------------------------------------------------",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    supervisor.mitm_intercept._log_path = log_path  # type: ignore[attr-defined]
-    class _DummyImage:
-        def save(self, buffer) -> None:
-            buffer.write(b"<svg xmlns='http://www.w3.org/2000/svg'></svg>")
-
-    class _DummyQrCode:
-        def __init__(self, **kwargs) -> None:
-            _ = kwargs
-            self._payload = ""
-
-        def add_data(self, value: str) -> None:
-            self._payload = value
-
-        def make(self, *, fit: bool = True) -> None:
-            _ = fit
-
-        def make_image(self, *, image_factory=None):
-            _ = image_factory
-            return _DummyImage()
-
-    fake_qrcode = types.ModuleType("qrcode")
-    fake_qrcode.QRCode = _DummyQrCode
-    fake_qrcode.__path__ = []  # type: ignore[attr-defined]
-    fake_qrcode_image = types.ModuleType("qrcode.image")
-    fake_qrcode_image.__path__ = []  # type: ignore[attr-defined]
-    fake_qrcode_svg = types.ModuleType("qrcode.image.svg")
-    fake_qrcode_svg.SvgImage = object
-    monkeypatch.setitem(sys.modules, "qrcode", fake_qrcode)
-    monkeypatch.setitem(sys.modules, "qrcode.image", fake_qrcode_image)
-    monkeypatch.setitem(sys.modules, "qrcode.image.svg", fake_qrcode_svg)
-
-    client = TestClient(supervisor.app)
-    login = client.post("/admin/api/login", json={"password": "correct horse battery staple"})
-    assert login.status_code == 200
-
-    response = client.get("/admin/api/mitm/wireguard-qr?endpoint_host=192.168.1.42")
-    assert response.status_code == 200
-    assert response.headers["content-type"].startswith("image/svg+xml")
-    assert "<svg" in response.text
 
 
 def test_ui_api_health_and_vacuums_return_runtime_payload_without_auth(tmp_path: Path) -> None:

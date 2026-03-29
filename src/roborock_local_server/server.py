@@ -7,15 +7,12 @@ import asyncio
 import base64
 from datetime import datetime, timezone
 import hashlib
-import ipaddress
 import json
 import logging
 from pathlib import Path
-import re
 import secrets
 import signal
 import socket
-import threading
 from typing import Any
 from urllib.parse import parse_qs
 
@@ -108,260 +105,6 @@ def _extract_explicit_pid(
 def _connectivity_check(host: str, port: int) -> None:
     with socket.create_connection((host, port), timeout=3):
         return
-
-
-def _resolve_mitm_viewer_host(*, bind_host: str, stack_fqdn: str) -> str:
-    host = bind_host.strip().strip("[]")
-    if host and host not in {"0.0.0.0", "::"}:
-        try:
-            ipaddress.ip_address(host)
-            return host
-        except ValueError:
-            pass
-    fqdn = stack_fqdn.strip()
-    if fqdn:
-        try:
-            resolved = socket.gethostbyname(fqdn)
-        except OSError:
-            resolved = ""
-        if resolved:
-            try:
-                ipaddress.ip_address(resolved)
-                return resolved
-            except ValueError:
-                pass
-    return "127.0.0.1"
-
-
-class MitmInterceptProcess:
-    """Tracks external MITM state/logs for the admin UI."""
-
-    _URL_RE = re.compile(r"https?://[^\s)]+")
-    _CONF_PATH_RE = re.compile(r"((?:[A-Za-z]:[\\/]|/|~\/)[^\s\"']+\.conf)")
-    _WG_ENDPOINT_RE = re.compile(r"^\s*Endpoint\s*=\s*(.+):(\d+)\s*$", re.IGNORECASE)
-
-    def __init__(
-        self,
-        *,
-        log_path: Path,
-        web_port: int = 8081,
-        viewer_host: str = "",
-        wireguard_endpoint_host: str = "",
-        conf_dir: Path | None = None,
-    ) -> None:
-        self._log_path = log_path
-        self._web_port = max(1, int(web_port))
-        self._viewer_host = viewer_host.strip()
-        self._wireguard_endpoint_host = wireguard_endpoint_host.strip()
-        self._conf_dir = conf_dir or (self._log_path.parent / ".mitmproxy")
-        self._lock = threading.Lock()
-        self._last_error = ""
-
-    @staticmethod
-    def _normalize_host(raw_host: str) -> str:
-        host = raw_host.strip()
-        if host.startswith(("http://", "https://")):
-            host = host.split("://", 1)[1]
-        host = host.split("/", 1)[0].strip()
-        host = host.strip("[]")
-        if host in {"0.0.0.0", "::"}:
-            host = "127.0.0.1"
-        return host
-
-    def _viewer_url(self) -> str:
-        host = self._normalize_host(self._viewer_host or "127.0.0.1")
-        return f"http://{host}:{self._web_port}/"
-
-    def _wireguard_endpoint_host_value(self, endpoint_host_override: str = "") -> str:
-        raw_host = endpoint_host_override or self._wireguard_endpoint_host or self._viewer_host
-        return self._normalize_host(raw_host or "127.0.0.1")
-
-    def _snapshot_locked(self) -> dict[str, Any]:
-        log_tail = self._read_log_tail_locked(lines=240)
-        hint_lines = self._extract_setup_hints_locked(log_tail)
-        detected_urls = self._extract_urls_locked(log_tail)
-        wireguard_path = self._resolve_wireguard_config_path_locked(log_tail)
-        wireguard_available = bool(wireguard_path) or bool(self._extract_wireguard_client_config_locked(log_tail))
-        return {
-            "available": True,
-            "running": False,
-            "pid": None,
-            "started_at": "",
-            "log_path": str(self._log_path),
-            "viewer_url": self._viewer_url(),
-            "log_view_url": "/admin/mitm/logs",
-            "log_tail_url": "/admin/api/mitm/log-tail",
-            "setup_hints": hint_lines,
-            "detected_urls": detected_urls,
-            "wireguard_config_path": str(wireguard_path) if wireguard_path is not None else "",
-            "wireguard_config_url": "/admin/api/mitm/wireguard-config" if wireguard_available else "",
-            "wireguard_qr_url": "/admin/api/mitm/wireguard-qr" if wireguard_available else "",
-            "last_error": self._last_error,
-            "last_exit_code": None,
-        }
-
-    def snapshot(self) -> dict[str, Any]:
-        with self._lock:
-            return self._snapshot_locked()
-
-    def log_tail(self, *, lines: int = 240) -> dict[str, Any]:
-        with self._lock:
-            normalized_lines = max(20, min(1200, int(lines)))
-            tail_lines = self._read_log_tail_locked(lines=normalized_lines)
-            return {
-                "available": self._log_path.exists(),
-                "path": str(self._log_path),
-                "lines": tail_lines,
-                "setup_hints": self._extract_setup_hints_locked(tail_lines),
-                "detected_urls": self._extract_urls_locked(tail_lines),
-            }
-
-    def wireguard_config(self, endpoint_host_override: str = "") -> dict[str, Any]:
-        with self._lock:
-            log_tail = self._read_log_tail_locked(lines=300)
-            config_from_logs = self._extract_wireguard_client_config_locked(log_tail)
-            config_path = self._resolve_wireguard_config_path_locked(log_tail)
-        if config_from_logs:
-            return {
-                "available": True,
-                "path": str(self._log_path),
-                "content": self._rewrite_wireguard_endpoint(config_from_logs, endpoint_host_override),
-            }
-        if config_path is None:
-            return {
-                "available": False,
-                "path": "",
-                "content": "",
-                "error": "WireGuard client config not found yet.",
-            }
-        try:
-            content = config_path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return {"available": False, "path": str(config_path), "content": ""}
-        return {
-            "available": True,
-            "path": str(config_path),
-            "content": self._rewrite_wireguard_endpoint(content, endpoint_host_override),
-        }
-
-    def _read_log_tail_locked(self, *, lines: int) -> list[str]:
-        if not self._log_path.exists():
-            return []
-        max_bytes = 256 * 1024
-        try:
-            with self._log_path.open("rb") as handle:
-                handle.seek(0, 2)
-                size = handle.tell()
-                if size <= 0:
-                    return []
-                handle.seek(max(0, size - max_bytes))
-                chunk = handle.read().decode("utf-8", errors="replace")
-        except OSError:
-            return []
-        all_lines = [line.rstrip("\r") for line in chunk.splitlines() if line.strip()]
-        if not all_lines:
-            return []
-        return all_lines[-lines:]
-
-    def _extract_setup_hints_locked(self, lines: list[str]) -> list[str]:
-        keywords = (
-            "wireguard",
-            "scan",
-            "qr",
-            "config",
-            "certificate",
-            "proxy listening",
-            "listening at",
-            "mitm.it",
-        )
-        out: list[str] = []
-        seen: set[str] = set()
-        for line in lines:
-            lowered = line.lower()
-            if not any(keyword in lowered for keyword in keywords):
-                continue
-            normalized = line.strip()
-            if not normalized or normalized in seen:
-                continue
-            seen.add(normalized)
-            out.append(normalized)
-        return out[-12:]
-
-    def _extract_urls_locked(self, lines: list[str]) -> list[str]:
-        out: list[str] = []
-        seen: set[str] = set()
-        for line in lines:
-            for candidate in self._URL_RE.findall(line):
-                normalized = candidate.rstrip(".,;)]}>")
-                if not normalized or normalized in seen:
-                    continue
-                seen.add(normalized)
-                out.append(normalized)
-        return out[-12:]
-
-    def _resolve_wireguard_config_path_locked(self, lines: list[str]) -> Path | None:
-        candidates: list[Path] = []
-        for line in lines:
-            for raw_path in self._CONF_PATH_RE.findall(line):
-                try:
-                    expanded = Path(raw_path).expanduser()
-                except Exception:
-                    continue
-                candidates.append(expanded)
-        home = Path.home()
-        candidates.extend(
-            [
-                self._conf_dir / "wireguard.conf",
-                self._conf_dir / "wireguard-client.conf",
-                self._conf_dir / "wireguard-client-profile.conf",
-                home / ".mitmproxy" / "wireguard.conf",
-                home / ".mitmproxy" / "wireguard-client.conf",
-                home / ".mitmproxy" / "wireguard-client-profile.conf",
-            ]
-        )
-        for candidate in candidates:
-            try:
-                if candidate.exists() and candidate.is_file():
-                    return candidate
-            except OSError:
-                continue
-        return None
-
-    def _extract_wireguard_client_config_locked(self, lines: list[str]) -> str:
-        start = -1
-        for index in range(len(lines) - 1, -1, -1):
-            if lines[index].strip() == "[Interface]":
-                start = index
-                break
-        if start < 0:
-            return ""
-        block: list[str] = []
-        for line in lines[start:]:
-            stripped = line.strip()
-            if stripped.startswith("---"):
-                break
-            if not stripped:
-                continue
-            block.append(stripped)
-        if not block:
-            return ""
-        if "[Peer]" not in block:
-            return ""
-        return "\n".join(block) + "\n"
-
-    def _rewrite_wireguard_endpoint(self, content: str, endpoint_host_override: str = "") -> str:
-        lines = content.splitlines()
-        endpoint_host = self._wireguard_endpoint_host_value(endpoint_host_override)
-        if not endpoint_host:
-            return content
-        for index, line in enumerate(lines):
-            match = self._WG_ENDPOINT_RE.match(line.strip())
-            if not match:
-                continue
-            endpoint_port = match.group(2)
-            lines[index] = f"Endpoint = {endpoint_host}:{endpoint_port}"
-            return "\n".join(lines).strip() + "\n"
-        return content
 
 
 class ManagedFastApiServer:
@@ -528,16 +271,6 @@ class ReleaseSupervisor:
         )
 
         self.loggers = self._setup_loggers()
-        mitm_viewer_host = _resolve_mitm_viewer_host(
-            bind_host=self.config.network.bind_host,
-            stack_fqdn=self.config.network.stack_fqdn,
-        )
-        self.mitm_intercept = MitmInterceptProcess(
-            log_path=self.paths.runtime_dir / "mitm_intercept.log",
-            viewer_host=mitm_viewer_host,
-            wireguard_endpoint_host=mitm_viewer_host,
-            conf_dir=self.paths.runtime_dir / ".mitmproxy",
-        )
         if not self.paths.device_key_state_path.exists():
             self.paths.device_key_state_path.parent.mkdir(parents=True, exist_ok=True)
             self.paths.device_key_state_path.write_text('{"devices":{}}\n', encoding="utf-8")
@@ -888,7 +621,6 @@ class ReleaseSupervisor:
         return {
             "health": health,
             "pairing": self.runtime_state.pairing_snapshot(),
-            "mitm_intercept": self.mitm_intercept.snapshot(),
             "support": PROJECT_SUPPORT,
             "inventory_path": str(self.paths.inventory_path),
             "cloud_snapshot_path": str(self.paths.cloud_snapshot_path),
@@ -953,14 +685,14 @@ class ReleaseSupervisor:
 
         @app.api_route("/", methods=list(ALL_HTTP_METHODS))
         async def root_handler(request: Request) -> Response:
-            if not self.enable_standalone_admin and self._is_standalone_route_path(request.url.path):
+            if self._is_standalone_route_path(request.url.path):
                 return JSONResponse({"error": "Not Found"}, status_code=404)
             return await self._handle_roborock_request(request)
 
         @app.api_route("/{full_path:path}", methods=list(ALL_HTTP_METHODS))
         async def catchall_handler(request: Request, full_path: str) -> Response:
             _ = full_path
-            if not self.enable_standalone_admin and self._is_standalone_route_path(request.url.path):
+            if self._is_standalone_route_path(request.url.path):
                 return JSONResponse({"error": "Not Found"}, status_code=404)
             return await self._handle_roborock_request(request)
 
@@ -1247,6 +979,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     generate_secret = subparsers.add_parser("generate-secret", help="Generate a random admin session secret")
     generate_secret.add_argument("--bytes", type=int, default=32)
+
+    configure = subparsers.add_parser("configure", help="Interactively write a small config.toml")
+    configure.add_argument("--config", default="config.toml")
+    configure.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite an existing config.toml and Cloudflare token file.",
+    )
 
     repair_identities = subparsers.add_parser(
         "repair-identities",

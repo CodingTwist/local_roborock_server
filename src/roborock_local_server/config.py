@@ -135,6 +135,12 @@ def load_config(path: str | Path) -> AppConfig:
     if tls_mode not in {"cloudflare_acme", "provided"}:
         raise ValueError("tls.mode must be 'cloudflare_acme' or 'provided'")
 
+    raw_broker_host = broker.get("host")
+    broker_host = str(raw_broker_host).strip() if raw_broker_host is not None else "127.0.0.1"
+    if broker_mode == "embedded" and not broker_host:
+        broker_host = "127.0.0.1"
+    broker_port_default = 18830 if broker_mode == "embedded" else 1883
+
     config = AppConfig(
         network=NetworkConfig(
             stack_fqdn=_require_non_empty(network.get("stack_fqdn"), "network.stack_fqdn"),
@@ -150,8 +156,8 @@ def load_config(path: str | Path) -> AppConfig:
         ),
         broker=BrokerConfig(
             mode=broker_mode,
-            host=str(broker.get("host", "127.0.0.1")).strip() or "127.0.0.1",
-            port=_as_int(broker.get("port"), "broker.port", 18830),
+            host=broker_host,
+            port=_as_int(broker.get("port"), "broker.port", broker_port_default),
             mosquitto_binary=str(broker.get("mosquitto_binary", "mosquitto")).strip() or "mosquitto",
             enable_topic_bridge=_as_bool(broker.get("enable_topic_bridge"), True),
         ),
@@ -178,6 +184,9 @@ def load_config(path: str | Path) -> AppConfig:
 
     if len(config.admin.session_secret) < 24:
         raise ValueError("admin.session_secret must be at least 24 characters")
+
+    if config.broker.mode == "external":
+        _require_non_empty(config.broker.host, "broker.host")
 
     if config.tls.mode == "cloudflare_acme":
         _require_non_empty(config.tls.base_domain, "tls.base_domain")

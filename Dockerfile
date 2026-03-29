@@ -18,8 +18,8 @@ WORKDIR /app
 
 COPY . /app
 
-RUN pip install --no-cache-dir "/app[mitm]"
+RUN pip install --no-cache-dir /app
 
-EXPOSE 443 8883 8081 51820/udp
+EXPOSE 443 8883
 
 CMD ["roborock-local-server", "serve", "--config", "/app/config.toml"]

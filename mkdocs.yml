@@ -1,0 +1,7 @@
+site_name: Roborock Local Server
+
+theme:
+  name: material
+
+nav:
+  - Home: index.md

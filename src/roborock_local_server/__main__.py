@@ -8,6 +8,7 @@ from pathlib import Path
 import secrets
 import sys
 
+from .configure import run_configure
 from .security import hash_password
 from .server import build_arg_parser, repair_runtime_identities, run_server
 
@@ -28,6 +29,18 @@ def main() -> int:
         if args.bytes < 16:
             raise SystemExit("--bytes must be at least 16")
         print(secrets.token_urlsafe(args.bytes))
+        return 0
+
+    if args.command == "configure":
+        try:
+            result = run_configure(config_file=Path(args.config), force=bool(args.force))
+        except (FileExistsError, ValueError) as exc:
+            raise SystemExit(str(exc)) from exc
+        print(f"Wrote config: {result.config_file}")
+        if result.cloudflare_token_file is not None:
+            print(f"Wrote Cloudflare token file: {result.cloudflare_token_file}")
+        if result.broker_template_needs_edit:
+            print("Fill in broker.host before starting the stack.")
         return 0
 
     if args.command == "serve":

@@ -18,11 +18,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "httpx>=0.27,<1",
+  "mkdocs>=1.6,<2",
+  "mkdocs-material>=9.6,<10",
   "pytest>=8,<9",
-]
-mitm = [
-  "mitmproxy>=11,<13",
-  "qrcode>=8,<9",
 ]
 
 [project.scripts]
