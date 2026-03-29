@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["pycryptodome>=3.20,<4"]
+# ///
 """Run cfgwifi onboarding against rriot_rr."""
 
 from __future__ import annotations
@@ -96,15 +100,28 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--server",
         required=True,
-        help="Value for token.r in the onboarding payload.",
+        help="Your server that you are connecting to (don't include the api-)",
     )
     parser.add_argument("--ssid", required=True)
     parser.add_argument("--password", required=True)
     return parser
 
 
+def sanitize_server(url: str) -> str:
+    """Sanitize server URL: strip scheme/api- prefix, ensure trailing slash."""
+    for prefix in ("https://", "http://"):
+        if url.lower().startswith(prefix):
+            url = url[len(prefix):]
+    if url.lower().startswith("api-"):
+        url = url[4:]
+    if not url.endswith("/"):
+        url += "/"
+    return url
+
+
 def main() -> int:
     args = build_parser().parse_args()
+    args.server = sanitize_server(args.server)
     token_s = f"S_TOKEN_{secrets.token_hex(16)}"
     token_t = f"T_TOKEN_{secrets.token_hex(16)}"
 
