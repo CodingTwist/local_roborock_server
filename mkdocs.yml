@@ -2,14 +2,52 @@ site_name: Roborock Local Server
 
 theme:
   name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - toc.follow
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - tables
+  - attr_list
+  - toc:
+      permalink: true
 
 nav:
   - Home: index.md
-  - Installation: installation.md
-  - Cloudflare setup: cloudflare_setup.md
-  - Onboarding: onboarding.md
-  - Home Assistant: home_assistant.md
-  - Using the Roborock App: roborock_app.md
-  - Tested Vacuums: tested_vacuums.md
-  - Custom MQTT: custom_mqtt.md
-  - Custom certificate management: custom_cert_management.md
+  - Getting Started:
+    - Installation: installation.md
+    - Cloudflare Setup: cloudflare_setup.md
+    - Onboarding: onboarding.md
+  - Integrations:
+    - Home Assistant: home_assistant.md
+    - Using the Roborock App: roborock_app.md
+  - Reference:
+    - Tested Vacuums: tested_vacuums.md
+    - Custom MQTT: custom_mqtt.md
+    - Custom Certificate Management: custom_cert_management.md
+    - Technical Writeup: technical_writeup.md
