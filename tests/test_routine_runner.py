@@ -253,12 +253,8 @@ def test_run_scene_syncs_scene_tids_before_step_commands(tmp_path: Path, monkeyp
         )
         assert sent_commands[1] == (RoborockCommand.SET_CUSTOM_MODE, [108])
         assert sent_commands[2] == (
-            RoborockCommand.SET_SCENES_ZONES,
-            {"data": [{"tid": "1773791700088", "zones": [{"zid": 8, "range": [32800, 22750, 34550, 25350]}]}]},
-        )
-        assert sent_commands[3] == (
             RoborockCommand.APP_ZONED_CLEAN,
-            [{"zones": [{"zid": 8, "repeat": 1}], "repeat": 1}],
+            [[32800, 22750, 34550, 25350, 1]],
         )
 
     asyncio.run(exercise())
@@ -460,3 +456,5 @@ def test_wait_for_step_complete_resume_only_sent_once(monkeypatch) -> None:
         assert len(client.sent_commands) == 2
 
     asyncio.run(exercise())
+
+

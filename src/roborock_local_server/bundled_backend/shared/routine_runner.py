@@ -251,55 +251,29 @@ def _segment_ids(entry: dict[str, Any]) -> list[int]:
     return segment_ids
 
 
-def _zone_ids(entry: dict[str, Any]) -> list[dict[str, int]]:
+def _zone_coord_params(entry: dict[str, Any]) -> list[list[int]]:
+    """Build raw coordinate params for app_zoned_clean: [[x1,y1,x2,y2,repeat], ...]."""
     raw_zones = entry.get("zones")
     if not isinstance(raw_zones, list) or not raw_zones:
         raise RoutineExecutionError("Scene zone step is missing zones[]")
-    zones: list[dict[str, int]] = []
-    for raw_zone in raw_zones:
-        if not isinstance(raw_zone, dict):
-            raise RoutineExecutionError("Scene zone entry is not an object")
-        zone_id = _as_int(raw_zone.get("zid"), 0)
-        if zone_id < 0:
-            raise RoutineExecutionError("Scene zone entry has invalid zid")
-        zones.append(
-            {
-                "zid": zone_id,
-                "repeat": max(1, _as_int(raw_zone.get("repeat"), 1)),
-            }
-        )
-    return zones
-
-
-def _scene_zone_sync_command(entry: dict[str, Any]) -> RoutineCommand | None:
-    tid = str(entry.get("tid") or "").strip()
-    if not tid:
-        return None
-    raw_zones = entry.get("zones")
-    if not isinstance(raw_zones, list) or not raw_zones:
-        return None
-    zones_with_ranges: list[dict[str, Any]] = []
+    coords: list[list[int]] = []
     for raw_zone in raw_zones:
         if not isinstance(raw_zone, dict):
             raise RoutineExecutionError("Scene zone entry is not an object")
         range_value = raw_zone.get("range")
         if not isinstance(range_value, list) or len(range_value) < 4:
-            continue
-        zone_id = _as_int(raw_zone.get("zid"), 0)
-        if zone_id < 0:
-            raise RoutineExecutionError("Scene zone entry has invalid zid")
-        zones_with_ranges.append(
-            {
-                "zid": zone_id,
-                "range": [_as_int(value, 0) for value in range_value[:4]],
-            }
-        )
-    if not zones_with_ranges:
-        return None
-    return RoutineCommand(
-        RoborockCommand.SET_SCENES_ZONES,
-        {"data": [{"tid": tid, "zones": zones_with_ranges}]},
-    )
+            raise RoutineExecutionError(
+                f"Scene zone zid={raw_zone.get('zid')} is missing range coordinates"
+            )
+        repeat = max(1, _as_int(raw_zone.get("repeat"), 1))
+        coords.append([
+            _as_int(range_value[0], 0),
+            _as_int(range_value[1], 0),
+            _as_int(range_value[2], 0),
+            _as_int(range_value[3], 0),
+            repeat,
+        ])
+    return coords
 
 
 def _single_data_entry(step: RoutineStep) -> dict[str, Any]:
@@ -371,19 +345,12 @@ def commands_for_step(step: RoutineStep) -> list[RoutineCommand]:
         ]
     if step.method == "do_scenes_zones":
         entry = _single_data_entry(step)
-        repeat = max(1, _as_int(entry.get("repeat"), 1))
-        sync_command = _scene_zone_sync_command(entry)
-        if sync_command is None:
-            raise RoutineExecutionError(
-                f"Zone step {step.step_id} is missing range coordinates for tid={entry.get('tid')!r}; "
-                "cannot execute zone cleaning without SET_SCENES_ZONES sync data"
-            )
+        zone_coords = _zone_coord_params(entry)
         return [
             *_settings_commands(entry),
-            sync_command,
             RoutineCommand(
                 RoborockCommand.APP_ZONED_CLEAN,
-                [{"zones": _zone_ids(entry), "repeat": repeat}],
+                zone_coords,
             ),
         ]
     if step.method == "do_scenes_app_start":
@@ -619,7 +586,7 @@ class _RoutineMqttClient:
 
                 if not is_ready:
                     saw_activity = True
-                    if sent_resume and state != 8:
+                    if sent_resume and state not in (8, 23, 26):
                         sent_resume = False
                 elif saw_cleaning:
                     return
@@ -941,14 +908,6 @@ class RoutineRunner:
                             routine_command.command.value,
                             exc,
                         )
-                    else:
-                        if (
-                            routine_command.command == RoborockCommand.SET_SCENES_ZONES
-                            and self._context.zone_ranges_store is not None
-                        ):
-                            self._context.zone_ranges_store.merge_set_scenes_zones_request(
-                                routine_command.params,
-                            )
                 if waits_for_step_complete:
                     logger.info("Waiting for ready state step=%s scene=%s", step.step_id, _scene_name(scene))
                     await client.wait_for_step_complete()
